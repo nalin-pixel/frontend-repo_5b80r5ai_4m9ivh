@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
-import { motion, useAnimationControls, useMotionValue, useSpring, AnimatePresence } from 'framer-motion'
+import { motion, useMotionValue, useSpring, AnimatePresence, useTransform } from 'framer-motion'
 
 // Utility: random in range
 const rand = (min, max) => Math.random() * (max - min) + min
@@ -28,6 +28,9 @@ const Eye = ({ x, y, blink, mood, tracking, delay = 0 }) => {
     worried: 0.95,
   }[mood] || 1), [mood])
 
+  // Use transform for clipPath (FM v11)
+  const clip = useTransform(lid, v => `inset(${v * 50}% 0 0 0 round 999px)`)
+
   return (
     <div className="relative h-16 w-16 rounded-full bg-white shadow-inner ring-1 ring-slate-200">
       <motion.div
@@ -43,7 +46,7 @@ const Eye = ({ x, y, blink, mood, tracking, delay = 0 }) => {
       <motion.div
         className="absolute inset-0 overflow-hidden rounded-full"
         style={{
-          clipPath: lid.to(v => `inset(${v * 50}% 0 0 0 round 999px)`),
+          clipPath: clip,
         }}
       >
         <div className="absolute inset-0 bg-white" />
