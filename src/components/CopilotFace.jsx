@@ -1,11 +1,12 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react'
+import React, { useEffect, useMemo, useState } from 'react'
 import { motion, useMotionValue, useSpring, AnimatePresence, useTransform } from 'framer-motion'
 
 // Utility: random in range
 const rand = (min, max) => Math.random() * (max - min) + min
 
 // Eye component with rich states
-const Eye = ({ x, y, blink, mood, tracking, delay = 0 }) => {
+const Eye = ({ x, y, blink, mood, offsetX, offsetY }) => {
+  // Smooth the incoming motion values
   const pupilX = useSpring(x, { stiffness: 350, damping: 28, mass: 0.25 })
   const pupilY = useSpring(y, { stiffness: 350, damping: 28, mass: 0.25 })
 
@@ -17,7 +18,7 @@ const Eye = ({ x, y, blink, mood, tracking, delay = 0 }) => {
       const t = setTimeout(() => lid.set(0), 120)
       return () => clearTimeout(t)
     }
-  }, [blink])
+  }, [blink, lid])
 
   // mood affects eye shape
   const moodScaleY = useMemo(() => ({
@@ -29,15 +30,23 @@ const Eye = ({ x, y, blink, mood, tracking, delay = 0 }) => {
   }[mood] || 1), [mood])
 
   // Use transform for clipPath (FM v11)
-  const clip = useTransform(lid, v => `inset(${v * 50}% 0 0 0 round 999px)`)
+  // lid: 0 (open) -> overlay hidden; 1 (closed) -> overlay fully visible
+  const clip = useTransform(lid, v => `inset(${(1 - v) * 100}% 0 0 0 round 999px)`) 
+
+  // Combine base position + offsets
+  const zero = useMotionValue(0)
+  const ox = offsetX || zero
+  const oy = offsetY || zero
+  const cx = useTransform([pupilX, ox], ([a, b]) => a + b)
+  const cy = useTransform([pupilY, oy], ([a, b]) => a + b)
 
   return (
     <div className="relative h-16 w-16 rounded-full bg-white shadow-inner ring-1 ring-slate-200">
       <motion.div
         className="absolute left-1/2 top-1/2 h-8 w-8 -translate-x-1/2 -translate-y-1/2 rounded-full bg-slate-900"
         style={{
-          x: pupilX,
-          y: pupilY,
+          x: cx,
+          y: cy,
           scaleY: moodScaleY,
         }}
         transition={{ type: 'spring', stiffness: 280, damping: 28 }}
@@ -75,31 +84,35 @@ const VoiceWave = ({ speaking }) => {
 const CopilotFace = ({ state }) => {
   const [blinkFlag, setBlinkFlag] = useState(false)
   const [mood, setMood] = useState('neutral')
-  const [cursor, setCursor] = useState({ x: 0, y: 0 })
-  const [sleepiness, setSleepiness] = useState(0) // 0-1
 
-  // motion values for pupils
+  // motion values for cursor tracking
   const px = useMotionValue(0)
   const py = useMotionValue(0)
 
-  const leftOffset = useMotionValue(0)
-  const rightOffset = useMotionValue(0)
+  // state-based offsets (e.g., listening/attention)
+  const offsetY = useMotionValue(0)
+
+  // per-eye subtle drift
+  const leftDriftX = useMotionValue(0)
+  const leftDriftY = useMotionValue(0)
+  const rightDriftX = useMotionValue(0)
+  const rightDriftY = useMotionValue(0)
 
   // Blink scheduler with natural variability
   useEffect(() => {
     let mounted = true
+    let tid
     const loop = () => {
       const next = rand(2000, 6000) // 2-6s
-      const t = setTimeout(() => {
+      tid = setTimeout(() => {
         if (!mounted) return
         setBlinkFlag(true)
         setTimeout(() => setBlinkFlag(false), 10)
         loop()
       }, next)
-      return () => clearTimeout(t)
     }
-    const stop = loop()
-    return () => { mounted = false; stop && stop() }
+    loop()
+    return () => { mounted = false; if (tid) clearTimeout(tid) }
   }, [])
 
   // Mouse tracking with natural lag
@@ -113,45 +126,7 @@ const CopilotFace = ({ state }) => {
     }
     window.addEventListener('mousemove', handleMove)
     return () => window.removeEventListener('mousemove', handleMove)
-  }, [])
-
-  // State-driven behaviors
-  useEffect(() => {
-    if (state === 'sleeping') {
-      setSleepiness(1)
-    } else {
-      setSleepiness(0)
-    }
-
-    switch (state) {
-      case 'success':
-        setMood('excited')
-        break
-      case 'prompt':
-        setMood('happy')
-        break
-      case 'error':
-        setMood('worried')
-        break
-      case 'sleeping':
-        setMood('sleepy')
-        break
-      default:
-        setMood('neutral')
-    }
-  }, [state])
-
-  // Asymmetric micro drift
-  useEffect(() => {
-    let raf
-    const drift = () => {
-      leftOffset.set(Math.sin(Date.now() / 1200) * 1.1)
-      rightOffset.set(Math.cos(Date.now() / 1500) * 1.0)
-      raf = requestAnimationFrame(drift)
-    }
-    raf = requestAnimationFrame(drift)
-    return () => cancelAnimationFrame(raf)
-  }, [])
+  }, [px, py])
 
   // Eye movement patterns
   const eyeSpring = { stiffness: 260, damping: 24, mass: 0.3 }
@@ -171,44 +146,79 @@ const CopilotFace = ({ state }) => {
       thinkingX.set(0)
       thinkingY.set(0)
     }
-    return () => clearTimeout(timer)
-  }, [state])
+    return () => { if (timer) clearTimeout(timer) }
+  }, [state, thinkingX, thinkingY])
 
   // Speaking wave
   const speaking = state === 'speaking'
 
-  // Compute final pupil positions depending on state
-  const finalX = useSpring(0, eyeSpring)
-  const finalY = useSpring(0, eyeSpring)
+  // Compute final pupil positions depending on state via a single active source
+  const finalX = useMotionValue(0)
+  const finalY = useMotionValue(0)
 
   useEffect(() => {
-    const unsubX = px.on('change', (v) => finalX.set(v))
-    const unsubY = py.on('change', (v) => finalY.set(v))
-    return () => { unsubX(); unsubY() }
-  }, [])
+    // clear previous subscriptions by recreating listeners per state
+    let unsubX = () => {}
+    let unsubY = () => {}
 
-  useEffect(() => {
     if (state === 'thinking') {
-      const unX = thinkingX.on('change', v => finalX.set(v))
-      const unY = thinkingY.on('change', v => finalY.set(v))
-      return () => { unX(); unY() }
+      unsubX = thinkingX.on('change', v => finalX.set(v))
+      unsubY = thinkingY.on('change', v => finalY.set(v))
+    } else {
+      unsubX = px.on('change', v => finalX.set(v))
+      unsubY = py.on('change', v => finalY.set(v))
     }
-  }, [state])
 
-  // Special states adjustments
+    return () => { unsubX(); unsubY() }
+  }, [state, px, py, thinkingX, thinkingY, finalX, finalY])
+
+  // State-driven mood + offsets
   useEffect(() => {
-    if (state === 'listening') {
-      finalY.set(-6)
+    switch (state) {
+      case 'success':
+        setMood('excited')
+        offsetY.set(0)
+        break
+      case 'prompt':
+        setMood('happy')
+        offsetY.set(0)
+        break
+      case 'error':
+        setMood('worried')
+        offsetY.set(0)
+        break
+      case 'sleeping':
+        setMood('sleepy')
+        offsetY.set(0)
+        break
+      case 'listening':
+        setMood('neutral')
+        offsetY.set(-6)
+        break
+      case 'attention':
+        setMood('neutral')
+        offsetY.set(-10)
+        break
+      default:
+        setMood('neutral')
+        offsetY.set(0)
     }
-    if (state === 'attention') {
-      finalY.set(-10)
+  }, [state, offsetY])
+
+  // Subtle, asymmetric micro-drift per eye
+  useEffect(() => {
+    let raf
+    const drift = () => {
+      const t = Date.now()
+      leftDriftX.set(Math.sin(t / 1200) * 1.1)
+      leftDriftY.set(Math.cos(t / 1600) * 0.8)
+      rightDriftX.set(Math.cos(t / 1500) * 1.0)
+      rightDriftY.set(Math.sin(t / 1300) * 0.7)
+      raf = requestAnimationFrame(drift)
     }
-    if (state === 'loading') {
-      // alternating pulses via offsets
-      const id = setInterval(() => setBlinkFlag(b => !b), 1200)
-      return () => clearInterval(id)
-    }
-  }, [state])
+    raf = requestAnimationFrame(drift)
+    return () => cancelAnimationFrame(raf)
+  }, [leftDriftX, leftDriftY, rightDriftX, rightDriftY])
 
   // Success bounce, error shake, attention bounce, prompt nod, dock bounce
   const containerVariants = {
@@ -216,7 +226,7 @@ const CopilotFace = ({ state }) => {
     success: { y: [0, -10, 0], rotate: [0, -2, 0], transition: { times: [0, 0.45, 1], duration: 0.9, ease: 'easeOut' } },
     error: { x: [0, -10, 10, -8, 8, -4, 4, 0], transition: { duration: 0.7, ease: 'easeInOut' } },
     attention: { y: [0, -16, 0, -8, 0], transition: { duration: 1.2, ease: 'easeOut' } },
-    prompt: { rotateX: [0, 10, 0], transition: { duration: 0.8 } },
+    prompt: { y: [0, -4, 0], transition: { duration: 0.8 } },
     bounce: { y: [0, -22, 0, -10, 0], transition: { duration: 1.3, ease: 'easeOut' } },
   }
 
@@ -229,11 +239,11 @@ const CopilotFace = ({ state }) => {
     <motion.div
       variants={containerVariants}
       animate={activeVariant}
-      className="mx-auto w-full max-w-sm rounded-3xl border border-slate-200 bg-white p-6 shadow-xl"
+      className="relative mx-auto w-full max-w-sm rounded-3xl border border-slate-200 bg-white p-6 shadow-xl"
     >
       <div className="flex items-center justify-center gap-6">
-        <Eye x={finalX} y={finalY} blink={doBlink} mood={mood} />
-        <Eye x={finalX} y={finalY} blink={doBlink && Math.random() > 0.35} mood={mood} />
+        <Eye x={finalX} y={finalY} blink={doBlink} mood={mood} offsetX={leftDriftX} offsetY={useTransform([offsetY, leftDriftY], ([a,b]) => a + b)} />
+        <Eye x={finalX} y={finalY} blink={doBlink && Math.random() > 0.35} mood={mood} offsetX={rightDriftX} offsetY={useTransform([offsetY, rightDriftY], ([a,b]) => a + b)} />
       </div>
 
       <div className="mt-6 flex items-center justify-center">
